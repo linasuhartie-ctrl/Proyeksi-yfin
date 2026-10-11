@@ -442,118 +442,99 @@ st.warning(
 )
 
 if start_scan or resume_scan:
-    if True:
-        if start_scan:
-            if scan_size_label == "50 saham":
-                target_codes = codes[:50]
-            elif scan_size_label == "300 saham":
-                target_codes = codes[:300]
-            elif scan_size_label == "500 saham":
-                target_codes = codes[:500]
-            else:
-                target_codes = codes[:]
-            st.session_state.scan_queue = list(target_codes)
-            st.session_state.scan_cursor = 0
-            st.session_state.scan_results = []
-            st.session_state.scan_errors = []
-            st.session_state.scan_settings = {
-                "timeframe": timeframe,
-                "horizon": int(horizon),
-                "source": universe_source,
-                "requested": len(target_codes),
-            }
-        elif not st.session_state.scan_queue:
-            st.warning("Belum ada scan yang bisa dilanjutkan. Tekan Jalankan GPR Scanner dulu.")
-
-        queue = st.session_state.scan_queue
-        cursor = int(st.session_state.scan_cursor)
-        settings = st.session_state.scan_settings
-        # Resume uses the original scan settings so a partial result is not mixed
-        # with a different timeframe or horizon.
-        scan_timeframe = settings.get("timeframe", timeframe)
-        scan_horizon = int(settings.get("horizon", horizon))
-        total = len(queue)
-
-        if total == 0:
-            st.error("Daftar kode saham kosong.")
-        elif cursor >= total:
-            st.success("Semua kode dalam antrean sudah diproses. Untuk scan baru, tekan Jalankan GPR Scanner.")
+    if start_scan:
+        if scan_size_label == "50 saham":
+            target_codes = codes[:50]
+        elif scan_size_label == "300 saham":
+            target_codes = codes[:300]
+        elif scan_size_label == "500 saham":
+            target_codes = codes[:500]
         else:
-            progress = st.progress(cursor / total, text=f"Melanjutkan dari {cursor}/{total}…")
-            status_box = st.empty()
-            request_pause = max(1.0, min(float(os.getenv("YF_REQUEST_PAUSE", "1.0")), 10.0))
-            rate_limited = False
-            processed_this_run = 0
-            # Small bounded batch per click prevents long runs and lets users resume.
-            batch_size = max(1, min(int(os.getenv("YF_BATCH_SIZE", "10")), 100))
-            stop_at = min(total, cursor + batch_size)
+            target_codes = codes[:]
+        st.session_state.scan_queue = list(target_codes)
+        st.session_state.scan_cursor = 0
+        st.session_state.scan_results = []
+        st.session_state.scan_errors = []
+        st.session_state.scan_settings = {
+            "timeframe": timeframe,
+            "horizon": int(horizon),
+            "source": universe_source,
+            "requested": len(target_codes),
+        }
+    elif not st.session_state.scan_queue:
+        st.warning("Belum ada scan yang bisa dilanjutkan. Tekan Jalankan GPR Scanner dulu.")
 
-            for pos in range(cursor, stop_at):
-                code = queue[pos]
-                try:
-                    result = analyze_one(code, scan_timeframe, scan_horizon)
-                    # Replace any previous result for the same symbol rather than duplicate it.
-                    st.session_state.scan_results = [
-                        item for item in st.session_state.scan_results if item.get("code") != code
-                    ] + [result]
-                    st.session_state.scan_errors = [
-                        item for item in st.session_state.scan_errors if item.get("code") != code
-                    ]
-                except ArjumRateLimitError as exc:
-                    st.session_state.scan_errors = [
-                        item for item in st.session_state.scan_errors if item.get("code") != code
-                    ] + [{"code": code, "error": str(exc)[:220]}]
-                    rate_limited = True
-                    status_box.warning(
-                        f"Arjum mengembalikan HTTP 429 pada {code}. Hasil yang sudah selesai disimpan. "
-                        "Jangan tekan scan berulang kali; tunggu sesuai batas provider, lalu tekan "
-                        "‘Lanjutkan scan yang terhenti’."
-                    )
-                    # Keep cursor at this symbol so it can be retried when quota resets.
-                    break
-                except Exception as exc:
-                    st.session_state.scan_errors = [
-                        item for item in st.session_state.scan_errors if item.get("code") != code
-                    ] + [{"code": code, "error": str(exc)[:220]}]
+    queue = st.session_state.scan_queue
+    cursor = int(st.session_state.scan_cursor)
+    settings = st.session_state.scan_settings
+    scan_timeframe = settings.get("timeframe", timeframe)
+    scan_horizon = int(settings.get("horizon", horizon))
+    total = len(queue)
 
-                st.session_state.scan_cursor = pos + 1
-                cursor = pos + 1
-                processed_this_run += 1
-                progress.progress(cursor / total, text=f"Memproses {cursor}/{total}: {code}")
-                if processed_this_run % 5 == 0 or cursor == total:
-                    status_box.info(
-                        f"Progres {cursor}/{total} · berhasil {len(st.session_state.scan_results)} · "
-                        f"error tercatat {len(st.session_state.scan_errors)}"
-                    )
-                if cursor < stop_at:
-                    time.sleep(request_pause)
+    if total == 0:
+        st.error("Daftar kode saham kosong.")
+    elif cursor >= total:
+        st.success("Semua kode dalam antrean sudah diproses. Untuk scan baru, tekan Jalankan GPR Scanner.")
+    else:
+        progress = st.progress(cursor / total, text=f"Memulai scan otomatis dari {cursor}/{total}…")
+        status_box = st.empty()
+        request_pause = max(0.2, min(float(os.getenv("YF_REQUEST_PAUSE", "0.5")), 5.0))
+        batch_size = max(1, min(int(os.getenv("YF_BATCH_SIZE", "10")), 50))
+        rate_limited = False
+        processed_this_run = 0
+        current_batch_end = min(total, cursor + batch_size)
+        status_box.info(f"Mode otomatis aktif · batch {cursor // batch_size + 1} · target {total} saham.")
 
-            st.session_state.scan_results.sort(
-                key=lambda item: (item["score"], item["gpr_return_pct"]), reverse=True
-            )
-            st.session_state.scan_meta = {
-                **settings,
-                "processed": st.session_state.scan_cursor,
-                "success": len(st.session_state.scan_results),
-                "errors": len(st.session_state.scan_errors),
-                "not_processed": max(0, total - st.session_state.scan_cursor),
-                "stopped_for_rate_limit": rate_limited,
-                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "batch_size": batch_size,
-            }
-            if rate_limited:
-                progress.progress(st.session_state.scan_cursor / total, text="Akses data dibatasi sementara")
-            elif st.session_state.scan_cursor >= total:
-                progress.progress(1.0, text="Pemindaian selesai.")
-                status_box.success(
-                    f"Selesai: {len(st.session_state.scan_results)} berhasil dianalisis dari {total} kode."
-                )
-            else:
-                progress.progress(st.session_state.scan_cursor / total, text="Batch selesai")
+        # Auto-continue across batches in the same run. Batch boundaries only
+        # update progress; the user does not need to press Resume each time.
+        for pos in range(cursor, total):
+            code = queue[pos]
+            try:
+                result = analyze_one(code, scan_timeframe, scan_horizon)
+                st.session_state.scan_results = [
+                    item for item in st.session_state.scan_results if item.get("code") != code
+                ] + [result]
+                st.session_state.scan_errors = [
+                    item for item in st.session_state.scan_errors if item.get("code") != code
+                ]
+            except Exception as exc:
+                st.session_state.scan_errors = [
+                    item for item in st.session_state.scan_errors if item.get("code") != code
+                ] + [{"code": code, "error": str(exc)[:220]}]
+
+            st.session_state.scan_cursor = pos + 1
+            cursor = pos + 1
+            processed_this_run += 1
+            progress.progress(cursor / total, text=f"Memproses {cursor}/{total}: {code}")
+
+            if cursor % batch_size == 0 or cursor == total:
                 status_box.info(
-                    f"Batch selesai. {total - st.session_state.scan_cursor} kode masih antre. "
-                    "Tekan ‘Lanjutkan scan yang terhenti’ untuk batch berikutnya."
+                    f"Batch otomatis selesai · {cursor}/{total} · berhasil "
+                    f"{len(st.session_state.scan_results)} · error "
+                    f"{len(st.session_state.scan_errors)} · lanjut otomatis…"
                 )
+            if cursor < total:
+                time.sleep(request_pause)
+
+        st.session_state.scan_results.sort(
+            key=lambda item: (item["score"], item["gpr_return_pct"]), reverse=True
+        )
+        st.session_state.scan_meta = {
+            **settings,
+            "processed": st.session_state.scan_cursor,
+            "success": len(st.session_state.scan_results),
+            "errors": len(st.session_state.scan_errors),
+            "not_processed": max(0, total - st.session_state.scan_cursor),
+            "stopped_for_rate_limit": rate_limited,
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "batch_size": batch_size,
+            "automatic_batches": True,
+        }
+        progress.progress(1.0, text="Pemindaian selesai.")
+        status_box.success(
+            f"Selesai: {len(st.session_state.scan_results)} berhasil dianalisis dari {total} kode. "
+            f"Error: {len(st.session_state.scan_errors)}."
+        )
 
 results = st.session_state.scan_results
 errors = st.session_state.scan_errors
@@ -561,7 +542,7 @@ meta = st.session_state.scan_meta
 if st.session_state.scan_queue and st.session_state.scan_cursor < len(st.session_state.scan_queue):
     st.info(
         f"Antrean scan: {st.session_state.scan_cursor}/{len(st.session_state.scan_queue)} kode selesai. "
-        "Hasil parsial tersimpan di sesi ini; gunakan tombol Lanjutkan untuk meneruskan."
+        "Hasil parsial tersimpan di sesi ini. Tekan tombol Lanjutkan hanya jika proses sebelumnya terhenti."
     )
 
 qualified = [item for item in results if float(item.get("score", 0)) >= min_score]
